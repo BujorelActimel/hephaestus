@@ -82,6 +82,11 @@ class Generator():
         self._blacklisted_classes: set = set()
 
         self.inline_functions: set = set()
+        # Stack of inline functions whose bodies we're currently generating
+        # Used to prevent cycles: can't call any function in this stack
+        self._inline_function_stack: list = []
+        # Map from inline function to set of inline functions it calls
+        self._inline_call_graph: dict = defaultdict(set)
 
     ### Entry Point Generators ###
 
@@ -310,9 +315,18 @@ class Generator():
 
         if func.is_inline:
             self.inline_functions.add(func)
+
+        # Push inline function onto stack before generating body (for cycle detection)
+        if func.is_inline:
+            self._inline_function_stack.append(func)
+
         if func.body is not None:
             body = self._gen_func_body(ret_type, func)
         func.body = body
+
+        # Pop inline function from stack
+        if func.is_inline:
+            self._inline_function_stack.pop()
 
         self._inside_java_lambda = prev_inside_java_lamdba
         self.depth = initial_depth
@@ -1518,12 +1532,33 @@ class Generator():
             rand_func = ut.random.choice(funcs)
             func = rand_func.attr_decl
 
-            # Check for recursive calls of inline functions
+            # Check for recursive calls and inline cycles
             if isinstance(func, ast.FunctionDeclaration) and func.is_inline:
+                should_skip = False
+
+                # Check 1: Direct recursion (by name in namespace)
                 for cur_namespace in initial_namespace:
                     if cur_namespace == func.name:
-                        funcs.remove(rand_func)
-                        func = None
+                        should_skip = True
+                        break
+
+                # Check 2: Function is in the inline call stack (prevents cycles)
+                # Any inline function currently being generated cannot be called
+                if not should_skip and func in self._inline_function_stack:
+                    should_skip = True
+
+                # Check 3: Inline cycle detection via call graph (A calls B, B calls A)
+                if not should_skip and self._inline_function_stack:
+                    if self._would_create_inline_cycle(func):
+                        should_skip = True
+
+                if should_skip:
+                    funcs.remove(rand_func)
+                    func = None
+                else:
+                    # Record this call in the call graph
+                    if self._inline_function_stack:
+                        self._inline_call_graph[self._inline_function_stack[-1]].add(func)
         if not funcs:
             msg = "No compatible functions in the current scope for type {}"
             log(self.logger, msg.format(etype))
@@ -1594,6 +1629,42 @@ class Generator():
                                 type_args=type_args)
 
     # Where
+
+    def _would_create_inline_cycle(self, target_func: ast.FunctionDeclaration) -> bool:
+        """Check if calling target_func would create a cycle with any function in the stack.
+
+        Args:
+            target_func: The inline function we want to call.
+
+        Returns:
+            True if calling target_func would create a cycle, False otherwise.
+        """
+        if not self._inline_function_stack:
+            return False
+
+        # Convert stack to set for O(1) lookup
+        stack_set = set(self._inline_function_stack)
+
+        # If target calls back to any function in our stack (directly or indirectly), it's a cycle
+        visited = set()
+        search_stack = [target_func]
+
+        while search_stack:
+            current = search_stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+
+            # Check if this function calls back to any function in our inline stack
+            if current in stack_set:
+                return True
+
+            # Add all inline functions that 'current' calls
+            for callee in self._inline_call_graph.get(current, []):
+                if callee not in visited:
+                    search_stack.append(callee)
+
+        return False
 
     def _gen_func_call_ref(self,
                            etype: tp.Type,
@@ -1842,6 +1913,12 @@ class Generator():
         for func in funcs:
             if func.attr_decl.name == self.namespace[-1]:
                 continue
+            # Skip inline functions that would create a cycle
+            if isinstance(func.attr_decl, ast.FunctionDeclaration) and func.attr_decl.is_inline:
+                if func.attr_decl in self._inline_function_stack:
+                    continue
+                if self._would_create_inline_cycle(func.attr_decl):
+                    continue
             refs.append(ast.FunctionReference(
                 func.attr_decl.name, func.receiver_expr, etype))
 
