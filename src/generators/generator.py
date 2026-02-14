@@ -275,16 +275,19 @@ class Generator():
             type_params = []
         if params is not None:
             for p in params:
+                # Mark function-type parameters as noinline when inside an inline function
+                if is_inline and getattr(p.param_type, 'is_function_type', lambda: False)():
+                    p.noinline = True
                 self._add_node_to_parent(self.namespace, p)
         else:
             params = (
-                self._gen_func_params()
+                self._gen_func_params(for_inline_function=is_inline)
                 if (
                     ut.random.bool(prob=0.25) or
                     self.language == 'java' or
                     self.language == 'groovy' and is_interface
                 )
-                else self._gen_func_params_with_default()
+                else self._gen_func_params_with_default(for_inline_function=is_inline)
             )
         ret_type = self._get_func_ret_type(params, etype, not_void=not_void)
         if is_interface or (abstract and ut.random.bool()):
@@ -321,15 +324,18 @@ class Generator():
 
     # Where
 
-    def _gen_func_params_with_default(self) -> List[ast.ParameterDeclaration]:
+    def _gen_func_params_with_default(self, for_inline_function=False) -> List[ast.ParameterDeclaration]:
         """Generate function parameters that may include one with default.
 
         It will generate at most one parameter with a default value.
+
+        Args:
+            for_inline_function: Whether these parameters are for an inline function.
         """
         has_default = False
         params = []
         for _ in range(ut.random.integer(0, cfg.limits.fn.max_params)):
-            param = self.gen_param_decl()
+            param = self.gen_param_decl(for_inline_function=for_inline_function)
             if not has_default:
                 has_default = ut.random.bool()
             if has_default:
@@ -344,11 +350,12 @@ class Generator():
             params.append(param)
         return params
 
-    def gen_param_decl(self, etype=None) -> ast.ParameterDeclaration:
+    def gen_param_decl(self, etype=None, for_inline_function=False) -> ast.ParameterDeclaration:
         """Generate a function Parameter Declaration.
 
         Args:
             etype: Parameter type.
+            for_inline_function: Whether this parameter is for an inline function.
         """
         name = gu.gen_identifier('lower')
         if etype and etype.is_wildcard():
@@ -356,7 +363,11 @@ class Generator():
             param_type = bound or self.select_type(exclude_covariants=True)
         else:
             param_type = etype or self.select_type(exclude_covariants=True)
-        param = ast.ParameterDeclaration(name, param_type)
+        # Mark function-type parameters as noinline when inside an inline function
+        noinline = False
+        if for_inline_function and getattr(param_type, 'is_function_type', lambda: False)():
+            noinline = True
+        param = ast.ParameterDeclaration(name, param_type, noinline=noinline)
         return param
 
     def gen_class_decl(self,
@@ -2237,15 +2248,18 @@ class Generator():
 
     # helper generators
 
-    def _gen_func_params(self) -> List[ast.ParameterDeclaration]:
+    def _gen_func_params(self, for_inline_function=False) -> List[ast.ParameterDeclaration]:
         """Generate parameters for a function or for a lambda.
+
+        Args:
+            for_inline_function: Whether these parameters are for an inline function.
         """
         params = []
         arr_index = None
         vararg_found = False
         vararg = None
         for i in range(ut.random.integer(0, cfg.limits.fn.max_params)):
-            param = self.gen_param_decl()
+            param = self.gen_param_decl(for_inline_function=for_inline_function)
             # If the type of the parameter is an array consider make it
             # a vararg.
             if not vararg_found and self._can_vararg_param(param) and (

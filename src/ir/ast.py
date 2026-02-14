@@ -325,11 +325,13 @@ class ParameterDeclaration(Declaration):
     def __init__(self, name: str,
                  param_type: types.Type,
                  vararg: bool = False,
-                 default: Expr = None):
+                 default: Expr = None,
+                 noinline: bool = False):
         self.name = name
         self.param_type = param_type
         self.vararg = vararg
         self.default = default
+        self.noinline = noinline
 
     def children(self):
         if self.default:
